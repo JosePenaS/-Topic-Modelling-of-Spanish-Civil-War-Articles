@@ -1,0 +1,859 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+
+```{r}
+library(tidyverse)
+library(stringi)
+```
+
+cargo base de datos
+```{r}
+
+datos<-read.csv(file.choose())
+
+```
+
+```{r}
+datos %>% glimpse()
+```
+
+Extrayendo el año
+
+primero creo un string con el match que deseo extraer, en este caso
+los años: desde 1932 a 2022
+```{r}
+
+years<-c(1932:2022)
+
+years
+
+```
+colapso el string para que funcione de manera adecuada
+```{r}
+
+years<-str_c(years, collapse = "|")
+
+```
+
+creo la columna con los años
+```{r}
+datos<-datos %>% mutate(year=(str_extract(title,years)))
+```
+
+contado los articulos por año
+```{r}
+
+datos %>% count(year,sort=TRUE)
+
+```
+
+limpio la base
+
+reemplazo los caracteres especiales
+```{r}
+
+
+datos<-datos %>% mutate(text = stri_trans_general(.$text, 'latin-ascii'))
+
+```
+ 
+
+```{r}
+
+datos<-datos %>% mutate(text = str_replace_all(text,"[[:digit:]]+", ""),
+                 text = str_replace_all(text,",",""),
+                 text = str_replace_all(text,"\\b[A-ZÁÉÍÓÚÑ]+\\b",""),
+                 text=tolower(text)
+                 )
+                 
+```
+
+
+
+creo strings con cosas comunes en los encabezados  como: "LA VARGUARDIA" y meses y dias. De no hacer esto va a crear topicos por dias y meses.
+
+String con dias
+```{r}
+dias<-str_c(c("domingo","sabado","lunes","martes","miercoles","jueves","viernes"), collapse = "|")
+
+dias
+```
+
+String con meses
+```{r}
+
+meses<-str_c(c("enero","febrero","marzo","abril","mayo","julio","junio","agosto","septiembre","octubre","noviembre","diciembre"), collapse = "|")
+
+meses
+```
+ahora limpio la base de numeros, palabras comunes, dias, meses y simbolos especiales
+```{r}
+        
+datos<-datos %>% mutate(text = str_replace_all(text,"[[:digit:]]+", ""),
+                 text = str_replace_all(text,"la vaguardia|lavanguardia", ""),
+                 text = str_replace_all(text,dias, ""),
+                 text = str_replace_all(text,meses, ""),
+                 text = str_replace_all(text,"pagina", ""),
+                 text = str_replace_all(text,"de|- | -", ""),
+                 text = str_replace_all(text,"<|>|\\*|\\^|&|£|-", ""),
+                 text = str_replace_all(text,"( al )|nov|sept", ""),
+                 text = str_replace_all(text,"\\(|\\)", "")
+                 )
+       
+```
+
+elimino duplicados
+```{r}
+
+datos<-distinct(datos,text, .keep_all= TRUE)
+
+```
+
+
+
+tokenizando la base
+```{r}
+library(tidytext)
+
+```
+
+```{r}
+topics<-datos %>% 
+  unnest_tokens(word, text) %>% count(title,word,sort=TRUE)
+```
+
+
+ 
+
+```{r}
+
+library(topicmodels)
+library(quanteda) 
+library(tm)
+
+```
+
+saco stop words
+```{r}
+custom_stop_words <- bind_rows(stop_words,
+                               data_frame(word = tm::stopwords("spanish"),
+                                          lexicon = "custom")) %>% 
+  as_tibble()  %>% 
+  mutate(word = stri_trans_general(.$word, 'latin-ascii')) %>%
+  filter(lexicon=="custom")
+```
+
+
+```{r}
+topics <- topics%>%
+    anti_join(custom_stop_words) %>% as_tibble()
+```
+
+```{r}
+cuenta<-topics %>% group_by(word) %>% summarize(n=n())
+```
+
+aislo palabras muy comunes y poco comunes
+```{r}
+palabras<-cuenta%>% filter(n>=245|n<10) %>% arrange(desc(n))
+
+palabras<-palabras$word
+```
+
+limpio la base nuevamente. 
+```{r}
+
+topics2<-topics %>% filter(!word %in% (palabras)) %>% as_tibble() %>% arrange(desc(n)) %>% 
+mutate(letras=nchar(word)) %>% filter(letras>1) %>% filter(!word %in% c("do","im","ro","ria","num","per","numero","ia","be","na","as","ios","ei","cir","tal","aquel","aun","todavia","vanguardia","menos","tras","pues","senor","ptas","aqui", "nunca", "nadie"))%>% mutate(word = str_replace_all(word,"presinte", "presidente")) %>%
+  mutate(word = str_replace_all(word,"mocracia", "democracia")) 
+
+```
+
+
+###Topic Modelling
+
+Vamos a pasar la base de datos al formato DocumentTermMatrix para poder hacer nuestro analisis
+
+```{r}
+dtm <- topics2 %>%
+  cast_dtm(title, word, n)
+```
+
+probamos con 4 topicos
+```{r}
+ap_lda <- LDA(dtm, k = 4, control = list(seed = 333))
+ap_lda
+```
+```{r}
+ap_topics <- tidy(ap_lda, matrix = "beta")
+ap_topics
+```
+
+lo primero que vamos a hacer es visualizar cuales son los terminos
+mas comunes por cada topico
+
+```{r}
+ap_top_terms <- ap_topics %>%
+  group_by(topic) %>%
+  top_n(10, beta) %>%
+  ungroup() %>%
+  arrange(topic, -beta)
+```
+
+
+
+```{r}
+ap_top_terms %>% 
+  mutate(term = reorder_within(term, beta, topic)) %>%
+  ggplot(aes(beta, term, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free") +
+  scale_y_reordered()
+
+```
+
+Ahora vamos a mirar que palabras tienen mas posibilidades de estar en cada tópico
+
+```{r}
+beta_spread <- ap_topics %>%
+  mutate(topic = paste0("topic", topic)) %>%
+  spread(topic, beta) %>%
+  filter(topic2 > .001 | topic4 > .001) %>%
+  mutate(log_ratio = log2(topic4 / topic2))
+```
+
+el log ratio o logaritmo binario de la razon de frecuencias relativas representa que tan grande es la diferencia de la probabilidad entre dos "cuerpos" de texto, topicos en nuestro caso, con respecto a alguna palabra. 
+
+
+Lo voy a utilizar para buscar diferencias entre topico 3 y 4
+
+```{r}
+
+beta_spread %>%
+  group_by(direction = log_ratio > 0) %>%
+  top_n(10, abs(log_ratio)) %>%
+  ungroup() %>%
+  mutate(term = reorder(term, log_ratio)) %>%
+  ggplot(aes(log_ratio, term)) +
+  geom_col() +
+  labs(x = "Log2 ratio of beta in topic 2 / topic 4", y = NULL)
+```
+pareciera ser que el tópico 2 es sobre el aspecto internacional de la guerra, mientras el 4 es sobre el desarrollo de ésta.
+
+
+##### PROBABILIDAD DE PERTENECER A UN TOPICO POR ARTICULO.
+
+Miramos el topico 3, ya que no entendemos de que se trata.
+
+```{r}
+
+ap_documents <- tidy(ap_lda, matrix = "gamma")
+
+ap_documents%>% filter(topic==3) %>% 
+  arrange(desc(gamma))
+
+documentos<-ap_documents%>% filter(topic==3) %>% 
+  arrange(desc(gamma)) %>% slice_head(n=10) %>% select(document) %>% as_vector()
+
+```
+
+
+```{r}
+datos %>% filter(title %in% (c("Edición del viernes, 13 mayo 1983, página 60","Edición del miércoles, 16 diciembre 1987, página 64","Edición del lunes, 03 junio 1996, página 54","Edición del lunes, 17 junio 1996, página 58","Edición del domingo, 16 febrero 1986, página 27","Edición del miércoles, 03 octubre 2007, página 38"))) %>% select(text)
+
+```
+Esta agrupando columnas en catalan, y tambien noticias de ceremonias o reuniones, subastas, conferencias, etc.
+
+#########################
+Voy a probar con 6 tópicos
+########################
+
+```{r}
+ap_lda6 <- LDA(dtm, k = 6, control = list(seed = 333))
+ap_lda6
+```
+Hago el mismo analisis 
+
+```{r}
+
+ap_topics <- tidy(ap_lda6, matrix = "beta")
+ap_topics
+
+
+ap_top_terms <- ap_topics %>%
+  group_by(topic) %>%
+  top_n(10, beta) %>%
+  ungroup() %>%
+  arrange(topic, -beta)
+
+```
+
+```{r}
+ap_top_terms %>% 
+  mutate(term = reorder_within(term, beta, topic)) %>% filter(!term %in% c("cion___3",
+  "ela___6","orn___5")) %>% 
+  ggplot(aes(beta, term, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free") +
+  scale_y_reordered()
+
+```
+Los tópicos 1, 2 y 6 parecieran tener sentido. El tópico 3 no parece muy claro, el 4 y el 5 son claramente mas politicos pero no es muy facil distinguir entre ellos. Voy a analizarlos en mas detalle.
+
+
+```{r}
+beta_spread <- ap_topics %>%
+  mutate(topic = paste0("topic", topic)) %>%
+  spread(topic, beta) %>%
+  filter(topic5 > .001 | topic4 > .001) %>%
+  mutate(log_ratio = log2(topic4 / topic5))
+
+
+beta_spread %>%
+  group_by(direction = log_ratio > 0) %>%
+  top_n(10, abs(log_ratio)) %>%
+  ungroup() %>%
+  mutate(term = reorder(term, log_ratio)) %>%
+  ggplot(aes(log_ratio, term)) +
+  geom_col() +
+  labs(x = "Log2 ratio of beta in topic 4 / topic 5", y = NULL)
+```
+
+El 4 tiene mas relación a acciones militares. El 5 tiene mas relación con aspectos politicos del conflicto.
+
+##########
+Analizando articulos relacionados al tópico 3
+#########
+
+```{r}
+ap_documents <- tidy(ap_lda6, matrix = "gamma")
+
+ap_documents%>% filter(topic==3) %>% 
+  arrange(desc(gamma))
+
+documentos<-ap_documents%>% filter(topic==3) %>% 
+  arrange(desc(gamma)) %>% slice_head(n=20) %>% select(document) %>% as_vector()
+
+```
+
+```{r}
+datos %>% filter(title %in% (c("Edición del viernes, 13 mayo 1983, página 60","Edición del miércoles, 16 diciembre 1987, página 64","Edición del lunes, 03 junio 1996, página 54","Edición del lunes, 17 junio 1996, página 58","Edición del lunes, 17 junio 1996, página 58","Edición del lunes, 27 junio 1994, página 53","Edición del martes, 09 julio 2019, página 48"))) %>% select(text,title)
+
+datos %>% filter(title %in% (documentos)) %>% select(text,title)
+
+```
+
+Nuevamente las columnas en catalan aparecen juntas, y en este caso aparecen columnas que contienen información relacionada a subastas. 
+
+Para continuar el analisis filtro las columnas en catalan
+
+```{r}
+catalan<-c("Edición del miércoles, 16 diciembre 1987, página 64",
+"Edición del viernes, 28 junio 1985, página 5",
+"Edición del viernes, 13 mayo 1983, página 60",
+"Edición del lunes, 17 junio 1996, página 58",
+"Edición del lunes, 03 junio 1996, página 54",
+"Edición del martes, 09 julio 2019, página 48",
+"Edición del lunes, 20 enero 2014, página 18")
+```
+
+
+```{r}
+topics2<-topics %>% filter(!word %in% (palabras)) %>% as_tibble() %>% arrange(desc(n)) %>% 
+mutate(letras=nchar(word)) %>% filter(letras>1) %>% filter(!word %in% c("do","im","ro","ria","num","per","numero","ia","be","na","as","ios","ei","cir","tal","aquel","aun","todavia","vanguardia","menos","tras","pues","senor","ptas","aqui", "nunca", "nadie","cion","ela","orn"))%>% mutate(word = str_replace_all(word,"presinte", "presidente")) %>%
+  mutate(word = str_replace_all(word,"mocracia", "democracia")) 
+
+```
+
+```{r}
+topics2<-topics2 %>% filter(!title %in% (catalan))
+```
+
+########################
+#Revisando las palabras de interes
+########################
+
+```{r}
+keywords_econ <- c("izquierdas", "derechas", "conservador", "marxismo", "comunismo", "fascismo", "anarquismo", "liberales","derecha","izquierda","liberal")
+
+keywords_cenper <- c("autodeterminacion", "centralismo", "referendum", "independencia", "secesion", "autogobierno", "autonomia", "descentralizacion", "territorial", "separatismo", "regionalista", "generalitat","region")
+
+```
+
+contando las palabras de interes
+```{r}
+topics %>% filter(word %in% (keywords_econ)) %>% as_tibble() %>%group_by(word) %>% summarize(n=sum(n),n_texto=n()) %>%  arrange(desc(n)) 
+```
+
+
+```{r}
+topics %>% filter(word %in% (keywords_cenper)) %>% as_tibble() %>%group_by(word) %>% summarize(n=sum(n),n_texto=n()) %>%  arrange(desc(n)) 
+```
+##################################
+TOPICOS USANDO EL PAQUETE keyATM
+#################################
+
+```{r}
+
+library(keyATM)
+
+```
+
+Creo el corpus con la base.
+```{r}
+agrupada<-topics2 %>% group_by(title) %>% 
+    summarize(text = str_c(word, collapse = " ")) %>%
+    ungroup()
+```
+
+
+```{r}
+
+corp <- corpus(agrupada, text_field = "text")
+
+```
+
+
+```{r}
+data_tokens <- tokens(corp)
+```
+
+```{r}
+data_dfm <- dfm(data_tokens) %>%
+              dfm_trim(min_termfreq = 5, min_docfreq = 2)
+```
+
+```{r}
+keyATM_docs <- keyATM_read(texts = data_dfm)
+summary(keyATM_docs)
+```
+
+```{r}
+keyATM_docs0 <- keyATM_read(texts = data_dfm_len0)
+
+```
+
+preparando palabras claves
+```{r}
+keywords <- list(
+keywords_econ = c("izquierdas", "derechas", "conservador", "marxismo", "comunismo", "fascismo", "anarquismo", "liberales","izquierda","derecha","liberal"),
+keywords_cenper = c("autodeterminación", "centralismo", "referendum", "independencia", "secesion", "autogobierno", "autonomia", "descentralización", "territorial", "separatismo", "regionalista", "generalitat","region"))
+```
+
+mirando la proporción de las palabras claves
+```{r}
+key_viz <- visualize_keywords(docs = keyATM_docs, keywords = keywords)
+key_viz
+```
+Las palabras claves tienen que aparecen en mas de un 0.1% del corpus 
+Lo cual no sucede para ninguna de nuestras palabras
+
+
+```{r}
+
+values_fig(key_viz) 
+
+```
+Hay algunas palabras que no aparecen en el corpus
+```{r}
+key_viz2 <- visualize_keywords(docs = keyATM_docs, keywords = keywords)
+```
+########
+Corro el modelo asistido
+########
+
+```{r}
+out <- keyATM(docs              = keyATM_docs,    
+              no_keyword_topics = 5,              
+              keywords          = keywords,       
+              model             = "base",         
+              options           = list(seed = 250))
+```
+
+Nuestras palabras de interes no aparecen en nuestros tópicos asistidos
+```{r}
+top_words(out,n=50)
+
+```
+
+documentos por tópicos
+
+```{r}
+top_docs(out)
+
+```
+
+```{r}
+datos[371,2]
+```
+
+```{r}
+fig_modelfit <- plot_modelfit(out)
+fig_modelfit
+```
+
+
+
+
+#######################################
+#Buscando el número óptimo de tópicos
+########################################
+
+```{r}
+dtm <- topics2 %>%
+  cast_dtm(title, word, n)
+```
+
+```{r}
+library(ldatuning)
+```
+
+explorar de 2 a 15 tópicos
+
+```{r}
+
+result <- FindTopicsNumber(
+  dtm,
+  topics = seq(from = 2, to = 15, by = 1),
+  metrics = c("Griffiths2004", "CaoJuan2009", "Arun2010", "Deveaud2014"),
+  method = "Gibbs",
+  control = list(seed = 77),
+  mc.cores = 2L,
+  verbose = TRUE
+)
+```
+
+
+```{r}
+FindTopicsNumber_plot(result)
+
+```
+
+pareciera ser que cerca de 15 hay un numero optimo
+
+vamos a entrenar un poco mas de modelos para estar seguros
+
+```{r}
+result2 <- FindTopicsNumber(
+  dtm,
+  topics = seq(from = 16, to = 20, by = 1),
+  metrics = c("Griffiths2004", "CaoJuan2009", "Arun2010", "Deveaud2014"),
+  method = "Gibbs",
+  control = list(seed = 77),
+  mc.cores = 2L,
+  verbose = TRUE
+)
+```
+
+```{r}
+
+FindTopicsNumber_plot(result2)
+
+```
+
+```{r}
+result.all<-rbind(result,result2)
+```
+
+```{r}
+FindTopicsNumber_plot(result.all)
+```
+
+
+```{r}
+result3 <- FindTopicsNumber(
+  dtm,
+  topics = seq(from = 21, to = 30, by = 1),
+  metrics = c("Griffiths2004", "CaoJuan2009", "Arun2010", "Deveaud2014"),
+  method = "Gibbs",
+  control = list(seed = 77),
+  mc.cores = 2L,
+  verbose = TRUE
+)
+```
+
+
+
+```{r}
+result.all2<-rbind(result.all,result3)
+```
+
+```{r}
+write.csv(result.all2,"models_k")
+```
+
+```{r}
+FindTopicsNumber_plot(result.all2)
+```
+
+
+
+Probando con valores de k mas grande para poder estar seguros
+
+```{r}
+result4 <- FindTopicsNumber(
+  dtm,
+  topics = seq(from = 35, to = 50, by = 5),
+  metrics = c("Griffiths2004", "CaoJuan2009", "Arun2010", "Deveaud2014"),
+  method = "Gibbs",
+  control = list(seed = 77),
+  mc.cores = 2L,
+  verbose = TRUE
+)
+```
+
+```{r}
+result.all3<-rbind(result.all2,result4)
+```
+
+```{r}
+write.csv(result.all3,"models_k2")
+```
+
+```{r}
+FindTopicsNumber_plot(result.all3)
+```
+
+```{r}
+result.all3 %>% filter(topics>=40|topics==14|topics==15)
+```
+45 pareciera ser segun griffiths y cao juan
+
+50 o mas para arun
+
+14 para el Deveaud 
+
+Voy a intentar con 14
+
+```{r}
+ap_lda14 <- LDA(dtm, k = 14, control = list(seed = 333))
+ap_lda14
+```
+
+```{r}
+
+ap_topics <- tidy(ap_lda14, matrix = "beta")
+ap_topics
+
+
+ap_top_terms <- ap_topics %>%
+  group_by(topic) %>%
+  top_n(10, beta) %>%
+  ungroup() %>%
+  arrange(topic, -beta)
+
+```
+
+
+```{r}
+ap_top_terms %>% 
+  mutate(term = reorder_within(term, beta, topic)) %>% 
+  ggplot(aes(beta, term, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free") +
+  scale_y_reordered()
+
+```
+
+
+buscando las palabras de interes dentro de nuestros tópicos
+```{r}
+ap_topics %>%
+   filter(term %in% (keywords_econ)) %>% arrange (desc(beta))
+```
+Fascismo es fuerte en el topico 1, 2 y 12
+
+En el 12 tambien son fuerte izquierda e izquierdas
+
+Comunismo en el 11
+
+Los terminos relacionados al liberalismo son fuerte en el topico 9
+
+Voy a calcular el promedio por tópico.
+```{r}
+
+ap_topics %>%
+   filter(term %in% (keywords_econ)) %>% arrange (desc(beta)) %>% group_by(topic) %>%
+   summarize(beta=mean(beta)) %>% arrange (desc(beta))
+
+```
+Los 4 topicos con los valores mas altos
+```{r}
+
+ap_top_terms <- ap_topics %>%
+  group_by(topic) %>%
+  top_n(15, beta) %>%
+  ungroup() %>%
+  arrange(topic, -beta)
+
+ap_top_terms %>% 
+  mutate(term = reorder_within(term, beta, topic)) %>% filter(topic %in% c(1,11,12,9)) %>% 
+  ggplot(aes(beta, term, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free") +
+  scale_y_reordered()
+
+```
+
+El topico con el valor mas alto
+```{r}
+
+ap_top_terms <- ap_topics %>%
+  group_by(topic) %>%
+  top_n(20, beta) %>%
+  ungroup() %>%
+  arrange(topic, -beta)
+
+ap_top_terms %>% 
+  mutate(term = reorder_within(term, beta, topic)) %>% filter(topic %in% c(12)) %>% 
+  filter(!term%in% c("dijo___12","ayer___12")) %>% 
+  ggplot(aes(beta, term, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free") +
+  scale_y_reordered()
+```
+Mirando articulos de este tópico
+
+```{r}
+ap_documents <- tidy(ap_lda14, matrix = "gamma")
+
+ap_documents%>% filter(topic==12) %>% 
+  arrange(desc(gamma))
+
+documentos<-ap_documents%>% filter(topic==12) %>% 
+  arrange(desc(gamma)) %>% slice_head(n=5) %>% select(document) %>% as_vector()
+
+```
+
+```{r}
+
+datos %>% filter(title %in% (documentos)) %>% select(text,title)
+
+```
+
+####################
+Palabras regionales
+####################
+
+
+Corro el mismo analisis para palabras regionales
+
+```{r}
+ap_topics %>%
+   filter(term %in% (keywords_cenper)) %>% arrange (desc(beta))
+```
+generalitat es la que pareciera ser mas importante.
+
+```{r}
+ap_topics %>%
+   filter(term %in% (keywords_cenper)) %>% arrange (desc(beta)) %>% group_by(topic) %>%
+   summarize(beta=mean(beta)) %>% arrange (desc(beta))
+```
+Dentro de los 4 topicos con los valores mas altos, 3 parecieran tener relación con la generalitat y solo una con región, 9
+
+
+```{r}
+ap_top_terms <- ap_topics %>%
+  group_by(topic) %>%
+  top_n(15, beta) %>%
+  ungroup() %>%
+  arrange(topic, -beta)
+
+ap_top_terms %>% 
+  mutate(term = reorder_within(term, beta, topic)) %>% filter(topic %in% c(10,5,12,9)) %>% 
+  ggplot(aes(beta, term, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free") +
+  scale_y_reordered()
+```
+
+El topico mas importante
+```{r}
+
+ap_top_terms <- ap_topics %>%
+  group_by(topic) %>%
+  top_n(20, beta) %>%
+  ungroup() %>%
+  arrange(topic, -beta)
+
+ap_top_terms %>% 
+  mutate(term = reorder_within(term, beta, topic)) %>% filter(topic %in% c(10)) %>% 
+  ggplot(aes(beta, term, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free") +
+  scale_y_reordered()
+```
+```{r}
+ap_documents <- tidy(ap_lda14, matrix = "gamma")
+
+ap_documents%>% filter(topic==10) %>% 
+  arrange(desc(gamma))
+
+documentos<-ap_documents%>% filter(topic==10) %>% 
+  arrange(desc(gamma)) %>% slice_head(n=5) %>% select(document) %>% as_vector()
+
+```
+
+```{r}
+
+datos %>% filter(title %in% (documentos)) %>% select(text,title)
+
+```
+
+##################################
+Visualizando de manera diferente.
+##################################
+
+Voy a visualizar los datos en 2 dimensiones 
+```{r}
+library(LDAvis)
+```
+
+
+```{r}
+dtm1 = dtm[slam::row_sums(dtm) > 0, ]
+phi = as.matrix(posterior(ap_lda14)$terms)
+
+theta <- as.matrix(posterior(ap_lda14)$topics)
+vocab <- colnames(phi)
+doc.length = slam::row_sums(dtm)
+term.freq = slam::col_sums(dtm)[match(vocab, colnames(dtm))]
+
+json = createJSON(phi = phi, theta = theta, vocab = vocab,
+                  doc.length = doc.length, term.frequency = term.freq)
+serVis(json)
+
+```
+
+exportando datos para hacer visualización
+```{r}
+
+ap_lda14$plot
+lda_model$plot(out.dir = "topic_modeling_files/ldavis", open.browser = FALSE)
+
+servr::daemon_stop(2)
+
+library(htmlwidgets)
+
+p<-serVis(json)
+
+serVis(json, out.dir = "C:/Users/Cayoyo/Desktop/R", open.browser = FALSE)
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
