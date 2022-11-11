@@ -1,0 +1,194 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+Cargo los paquetes que vamos a ocupar en esta parte.
+```{r}
+library(rvest)
+library(tidyverse)
+```
+
+Extraigo los links que vamos a ocupar mas adelante.
+```{r}
+
+links = data.frame()
+
+for (page_result in seq(from = 1, to = 56, by =1)) {
+  link = paste0("http://hemeroteca.lavanguardia.com/search.html?q=%22guerra%2Bcivil%2Bespa%C3%B1*%22&bd=01&bm=04&by=1931&ed=05&em=09&ey=2022&keywords=&__checkbox_home=true&edition=&exclude=&x=47&y=18&excludeAds=true&sortBy=date&order=desc&page=", 
+               page_result)
+  
+  page = read_html(link)
+  
+link = page %>% html_nodes(".edicion")%>% html_attr('href')
+
+  
+  
+    links = rbind(links, data.frame(link, stringsAsFactors = FALSE))
+
+  print(paste("Page:", page_result))  
+}
+```
+
+Aquí le digo a R en donde quiero que los pdfs se guarden. Si lo quieres reproducir vas a tener que elegir una carpeta dentro de tu ordenador en donde quieras guardar los resultados.
+
+```{r}
+setwd("C:/Users/Cayoyo/Desktop/R/pdfs")
+```
+
+cambio el formato del objeto links a vector. Esto me va a permitir scrapear los datos
+```{r}
+
+links2<-links$link
+
+```
+
+creo una variable x que contenga una ID. Esto puede llegar a ser importante. En caso de que exista un error esto nos va a permitir identificar cual fue el link
+en donde hubo un problema
+```{r}
+links$X<-1:489
+```
+
+descargo los pdf de manera automatizada
+```{r}
+
+for(i in 1:length(links2)) { 
+  
+  tryCatch({
+
+link = links2[i]
+
+page = read_html(link)
+  
+print(links2[i])  
+
+page %>% 
+  html_nodes("a") %>% 
+  html_attr("href") %>% 
+  str_subset("\\.pdf") %>%
+  walk2(., basename(.), download.file, mode = "wb")
+
+ }, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+
+}
+```
+
+No pude abrir este link
+
+'http://hemeroteca-paginas.lavanguardia.com/LVE05/PUB/2012/02/10/LVG201202100101LB.pdf'
+
+#######################################
+######Recolectando el texto de los PDF
+#######################################
+
+Primero cargo el paquete rselenium
+```{r}
+
+library(RSelenium)
+
+```
+reviso las versiones de chrome disponibles
+```{r}
+binman::list_versions("chromedriver")
+
+```
+
+Abriendo puertos para que funcione el navegador.
+```{r}
+
+driver <- rsDriver(browser=c("chrome"), chromever="106.0.5249.21",port=4573L)
+
+
+remote_driver <- driver[["client"]]
+remote_driver$open()
+```
+
+recolectando el texto usando Rselenium 
+```{r}
+out1=NULL
+
+for(i in 1:length(links2)) { 
+  
+  tryCatch({
+  
+  remote_driver$navigate(links2[i])
+  
+  Sys.sleep(1)
+  
+  title <- remote_driver$findElement(using = 'css selector',
+                                    value = '.result')  
+  
+  title1<-title$getElementText() 
+  
+  webElem <- remote_driver$findElement(using = 'css selector', value = '.botons_04')
+  
+  Sys.sleep(1)  
+  
+  webElem$clickElement() 
+  
+  Sys.sleep(2)  
+  
+  webElem <- remote_driver$findElements(using = 'css selector',
+                                        value = '.text')
+  
+  text<-webElem[[1]]$getElementText()
+  
+  values  = c(title1,text)
+  
+  mydf  = as.data.frame(t(values))
+  names(mydf)= c("title","text")
+  
+  out1 <- rbind(out1,mydf)
+  
+  print(links2[i])  
+  
+  }, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+
+}
+```
+
+hago unos pequeños cambios a los datos para poder exportarlos 
+```{r}
+
+lst <- lapply(out1, unlist)
+
+datos<-data.frame(lapply(lst, `length<-`, max(lengths(lst))))
+
+datos<-as_tibble(datos)
+
+```
+
+exporto la primera versión
+```{r}
+write.csv(datos, "OCR.csv")
+```
+
+cargo los datos
+```{r}
+
+OCR<-read.csv(file.choose())
+
+```
+
+elimino los hyphens
+```{r}
+
+OCR2<-OCR %>% mutate(text = str_replace_all(text, "- ", "")) %>% select(text,title)
+
+```
+
+exporto la base nuevamente
+```{r}
+write.csv(OCR2, "texto_la_vaguardia.csv")
+```
+
+aqui cargo la nueva versión
+```{r}
+
+OCR2<-read.csv(file.choose())
+
+```
+
+
+
+
